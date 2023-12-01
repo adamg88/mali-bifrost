@@ -35,9 +35,6 @@ bob_defaults {
             "CONFIG_GPU_HWVER={{.hwver}}",
         ],
     },
-    mali_platform_dt_pin_rst: {
-        kbuild_options: ["CONFIG_MALI_PLATFORM_DT_PIN_RST=y"],
-    },
     gpu_has_csf: {
         kbuild_options: ["CONFIG_MALI_CSF_SUPPORT=y"],
     },
@@ -62,14 +59,11 @@ bob_defaults {
     mali_dma_buf_legacy_compat: {
         kbuild_options: ["CONFIG_MALI_DMA_BUF_LEGACY_COMPAT=y"],
     },
-    large_page_alloc_override: {
-        kbuild_options: ["CONFIG_LARGE_PAGE_ALLOC_OVERRIDE=y"],
-    },
-    large_page_alloc: {
-        kbuild_options: ["CONFIG_LARGE_PAGE_ALLOC=y"],
-    },
     page_migration_support: {
         kbuild_options: ["CONFIG_PAGE_MIGRATION_SUPPORT=y"],
+    },
+    large_page_support: {
+        kbuild_options: ["CONFIG_LARGE_PAGE_SUPPORT=y"],
     },
     mali_memory_fully_backed: {
         kbuild_options: ["CONFIG_MALI_MEMORY_FULLY_BACKED=y"],
@@ -103,9 +97,6 @@ bob_defaults {
     },
     mali_system_trace: {
         kbuild_options: ["CONFIG_MALI_SYSTEM_TRACE=y"],
-    },
-    buslog: {
-        kbuild_options: ["CONFIG_MALI_BUSLOG=y"],
     },
     cinstr_vector_dump: {
         kbuild_options: ["CONFIG_MALI_VECTOR_DUMP=y"],
@@ -213,6 +204,7 @@ bob_kernel_module {
         "platform/*/*/*/*.h",
         "platform/*/*/*/Kbuild",
         "thirdparty/*.c",
+        "thirdparty/*.h",
         "thirdparty/Kbuild",
         "debug/*.c",
         "debug/*.h",
@@ -223,6 +215,11 @@ bob_kernel_module {
         "gpu/*.c",
         "gpu/*.h",
         "gpu/Kbuild",
+        "hw_access/*.c",
+        "hw_access/*.h",
+        "hw_access/*/*.c",
+        "hw_access/*/*.h",
+        "hw_access/Kbuild",
         "tl/*.c",
         "tl/*.h",
         "tl/Kbuild",
@@ -284,9 +281,4 @@ bob_kernel_module {
         "CONFIG_MALI_MIDGARD=m",
         "CONFIG_MALI_KUTF=n",
     ],
-    buslog: {
-        extra_symbols: [
-            "bus_logger",
-        ],
-    },
 }

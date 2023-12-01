@@ -29,6 +29,7 @@
 #include <linux/types.h>
 #include <linux/wait.h>
 
+#include <hw_access/mali_kbase_hw_access.h>
 #include "mali_kbase_csf_firmware.h"
 #include "mali_kbase_refcount_defs.h"
 #include "mali_kbase_csf_event.h"
@@ -52,13 +53,13 @@
  */
 #define MAX_TILER_HEAPS (128)
 
-#define CSF_FIRMWARE_ENTRY_READ       (1ul << 0)
-#define CSF_FIRMWARE_ENTRY_WRITE      (1ul << 1)
-#define CSF_FIRMWARE_ENTRY_EXECUTE    (1ul << 2)
+#define CSF_FIRMWARE_ENTRY_READ (1ul << 0)
+#define CSF_FIRMWARE_ENTRY_WRITE (1ul << 1)
+#define CSF_FIRMWARE_ENTRY_EXECUTE (1ul << 2)
 #define CSF_FIRMWARE_ENTRY_CACHE_MODE (3ul << 3)
-#define CSF_FIRMWARE_ENTRY_PROTECTED  (1ul << 5)
-#define CSF_FIRMWARE_ENTRY_SHARED     (1ul << 30)
-#define CSF_FIRMWARE_ENTRY_ZERO       (1ul << 31)
+#define CSF_FIRMWARE_ENTRY_PROTECTED (1ul << 5)
+#define CSF_FIRMWARE_ENTRY_SHARED (1ul << 30)
+#define CSF_FIRMWARE_ENTRY_ZERO (1ul << 31)
 
 /**
  * enum kbase_csf_queue_bind_state - bind state of the queue
@@ -377,7 +378,6 @@ struct kbase_csf_notification {
  * @trace_offset_ptr:  Pointer to the CS trace buffer offset variable.
  * @trace_buffer_size: CS trace buffer size for the queue.
  * @trace_cfg:         CS trace configuration parameters.
- * @error:          GPU command queue fatal information to pass to user space.
  * @cs_error_work:    Work item to handle the CS fatal event reported for this
  *                    queue or the CS fault event if dump on fault is enabled
  *                    and acknowledgment for CS fault event needs to be done
@@ -426,15 +426,12 @@ struct kbase_queue {
 	u64 trace_offset_ptr;
 	u32 trace_buffer_size;
 	u32 trace_cfg;
-	struct kbase_csf_notification error;
 	struct work_struct cs_error_work;
 	u64 cs_error_info;
 	u32 cs_error;
 	bool cs_error_fatal;
 	u64 extract_ofs;
-#if IS_ENABLED(CONFIG_DEBUG_FS)
 	u64 saved_cmd_ptr;
-#endif /* CONFIG_DEBUG_FS */
 };
 
 /**
@@ -529,10 +526,6 @@ struct kbase_protected_suspend_buffer {
  *                         have pending protected mode entry requests.
  * @error_fatal: An error of type BASE_GPU_QUEUE_GROUP_ERROR_FATAL to be
  *               returned to userspace if such an error has occurred.
- * @error_timeout: An error of type BASE_GPU_QUEUE_GROUP_ERROR_TIMEOUT
- *                 to be returned to userspace if such an error has occurred.
- * @error_tiler_oom: An error of type BASE_GPU_QUEUE_GROUP_ERROR_TILER_HEAP_OOM
- *                   to be returned to userspace if such an error has occurred.
  * @timer_event_work: Work item to handle the progress timeout fatal event
  *                    for the group.
  * @deschedule_deferred_cnt: Counter keeping a track of the number of threads
@@ -582,8 +575,6 @@ struct kbase_queue_group {
 	DECLARE_BITMAP(protm_pending_bitmap, MAX_SUPPORTED_STREAMS_PER_GROUP);
 
 	struct kbase_csf_notification error_fatal;
-	struct kbase_csf_notification error_timeout;
-	struct kbase_csf_notification error_tiler_oom;
 
 	struct work_struct timer_event_work;
 
@@ -598,6 +589,12 @@ struct kbase_queue_group {
 #endif
 	void *csg_reg;
 	u8 csg_reg_bind_retries;
+#if IS_ENABLED(CONFIG_MALI_TRACE_POWER_GPU_WORK_PERIOD)
+	/**
+	 * @prev_act: Previous CSG activity transition in a GPU metrics.
+	 */
+	bool prev_act;
+#endif
 };
 
 /**
@@ -857,8 +854,7 @@ struct kbase_csf_user_reg_context {
 struct kbase_csf_context {
 	struct list_head event_pages_head;
 	DECLARE_BITMAP(cookies, KBASE_CSF_NUM_USER_IO_PAGES_HANDLE);
-	struct kbase_queue *user_pages_info[
-		KBASE_CSF_NUM_USER_IO_PAGES_HANDLE];
+	struct kbase_queue *user_pages_info[KBASE_CSF_NUM_USER_IO_PAGES_HANDLE];
 	struct mutex lock;
 	struct kbase_queue_group *queue_groups[MAX_QUEUE_GROUP_NUM];
 	struct list_head queue_list;
@@ -868,9 +864,7 @@ struct kbase_csf_context {
 	struct workqueue_struct *wq;
 	struct list_head link;
 	struct kbase_csf_scheduler_context sched;
-#if IS_ENABLED(CONFIG_DEBUG_FS)
 	struct kbase_csf_cpu_queue_context cpu_queue;
-#endif
 	struct kbase_csf_user_reg_context user_reg;
 };
 
@@ -1029,7 +1023,7 @@ struct kbase_csf_mcu_shared_regions {
  *                          slot, to check if firmware is alive and would
  *                          initiate a reset if the ping request isn't
  *                          acknowledged.
- * @top_ctx:                Pointer to the Kbase context corresponding to the
+ * @top_kctx:               Pointer to the Kbase context corresponding to the
  *                          @top_grp.
  * @top_grp:                Pointer to queue group inside @groups_to_schedule
  *                          list that was assigned the highest slot priority.
@@ -1112,7 +1106,7 @@ struct kbase_csf_scheduler {
 	atomic_t pending_tick_work;
 	atomic_t pending_tock_work;
 	struct delayed_work ping_work;
-	struct kbase_context *top_ctx;
+	struct kbase_context *top_kctx;
 	struct kbase_queue_group *top_grp;
 	struct kbase_queue_group *active_protm_grp;
 	struct workqueue_struct *idle_wq;
@@ -1130,6 +1124,30 @@ struct kbase_csf_scheduler {
 	struct completion kthread_signal;
 	bool kthread_running;
 	struct task_struct *gpuq_kthread;
+#if IS_ENABLED(CONFIG_MALI_TRACE_POWER_GPU_WORK_PERIOD)
+	/**
+	 *  @gpu_metrics_tb: Handler of firmware trace buffer for gpu_metrics
+	 */
+	struct firmware_trace_buffer *gpu_metrics_tb;
+
+	/**
+	 * @gpu_metrics_timer: High-resolution timer used to periodically emit the GPU metrics
+	 *                     tracepoints for applications that are using the GPU. The timer is
+	 *                     needed for the long duration handling so that the length of work
+	 *                     period is within the allowed limit.
+	 *                     Timer callback function will be executed in soft irq context.
+	 */
+	struct hrtimer gpu_metrics_timer;
+
+	/**
+	 * @gpu_metrics_lock: Lock for the serialization of GPU metrics related code. The lock
+	 *                    is not acquired in the HARDIRQ-safe way, so shall not be acquired
+	 *                    after acquiring a lock that can be taken in the hard irq.
+	 *                    The softirq must be disabled whenever the lock is taken from the
+	 *                    process context.
+	 */
+	spinlock_t gpu_metrics_lock;
+#endif /* CONFIG_MALI_TRACE_POWER_GPU_WORK_PERIOD */
 };
 
 /*
@@ -1140,15 +1158,14 @@ struct kbase_csf_scheduler {
 /*
  * Maximum value of the global progress timeout.
  */
-#define GLB_PROGRESS_TIMER_TIMEOUT_MAX \
-	((GLB_PROGRESS_TIMER_TIMEOUT_MASK >> \
-		GLB_PROGRESS_TIMER_TIMEOUT_SHIFT) * \
-	GLB_PROGRESS_TIMER_TIMEOUT_SCALE)
+#define GLB_PROGRESS_TIMER_TIMEOUT_MAX                                           \
+	((GLB_PROGRESS_TIMER_TIMEOUT_MASK >> GLB_PROGRESS_TIMER_TIMEOUT_SHIFT) * \
+	 GLB_PROGRESS_TIMER_TIMEOUT_SCALE)
 
 /*
- * Default GLB_PWROFF_TIMER_TIMEOUT value in unit of micro-seconds.
+ * Default GLB_PWROFF_TIMER_TIMEOUT value in unit of nanosecond.
  */
-#define DEFAULT_GLB_PWROFF_TIMEOUT_US (800)
+#define DEFAULT_GLB_PWROFF_TIMEOUT_NS (800 * 1000)
 
 /*
  * In typical operations, the management of the shader core power transitions
@@ -1196,7 +1213,7 @@ enum kbase_ipa_core_type {
 /*
  * Total number of configurable counters existing on the IPA Control interface.
  */
-#define KBASE_IPA_CONTROL_MAX_COUNTERS                                         \
+#define KBASE_IPA_CONTROL_MAX_COUNTERS \
 	((size_t)KBASE_IPA_CORE_TYPE_NUM * KBASE_IPA_CONTROL_NUM_BLOCK_COUNTERS)
 
 /**
@@ -1570,22 +1587,28 @@ struct kbase_csf_user_reg {
  * @fw_error_work:          Work item for handling the firmware internal error
  *                          fatal event.
  * @ipa_control:            IPA Control component manager.
- * @mcu_core_pwroff_dur_us: Sysfs attribute for the glb_pwroff timeout input
- *                          in unit of micro-seconds. The firmware does not use
+ * @mcu_core_pwroff_dur_ns: Sysfs attribute for the glb_pwroff timeout input
+ *                          in unit of nanoseconds. The firmware does not use
  *                          it directly.
  * @mcu_core_pwroff_dur_count: The counterpart of the glb_pwroff timeout input
  *                             in interface required format, ready to be used
  *                             directly in the firmware.
+ * @mcu_core_pwroff_dur_count_modifier: Update csffw_glb_req_cfg_pwroff_timer
+ *                                      to make the shr(10) modifier conditional
+ *                                      on new flag in GLB_PWROFF_TIMER_CONFIG
  * @mcu_core_pwroff_reg_shadow: The actual value that has been programed into
  *                              the glb_pwoff register. This is separated from
  *                              the @p mcu_core_pwroff_dur_count as an update
  *                              to the latter is asynchronous.
- * @gpu_idle_hysteresis_us: Sysfs attribute for the idle hysteresis time
- *                          window in unit of microseconds. The firmware does not
+ * @gpu_idle_hysteresis_ns: Sysfs attribute for the idle hysteresis time
+ *                          window in unit of nanoseconds. The firmware does not
  *                          use it directly.
  * @gpu_idle_dur_count:     The counterpart of the hysteresis time window in
  *                          interface required format, ready to be used
  *                          directly in the firmware.
+ * @gpu_idle_dur_count_modifier: Update csffw_glb_req_idle_enable to make the shr(10)
+ *                               modifier conditional on the new flag
+ *                               in GLB_IDLE_TIMER_CONFIG.
  * @fw_timeout_ms:          Timeout value (in milliseconds) used when waiting
  *                          for any request sent to the firmware.
  * @hwcnt:                  Contain members required for handling the dump of
@@ -1601,6 +1624,8 @@ struct kbase_csf_user_reg {
  *                          yet processed, categorised by queue group's priority.
  * @pending_gpuq_kicks_lock: Protect @pending_gpu_kicks and
  *                           kbase_queue.pending_kick_link.
+ * @quirks_ext:             Pointer to an allocated buffer containing the firmware
+ *                          workarounds configuration.
  */
 struct kbase_csf_device {
 	struct kbase_mmu_table mcu_mmu;
@@ -1631,11 +1656,13 @@ struct kbase_csf_device {
 	bool glb_init_request_pending;
 	struct work_struct fw_error_work;
 	struct kbase_ipa_control ipa_control;
-	u32 mcu_core_pwroff_dur_us;
+	u32 mcu_core_pwroff_dur_ns;
 	u32 mcu_core_pwroff_dur_count;
+	u32 mcu_core_pwroff_dur_count_modifier;
 	u32 mcu_core_pwroff_reg_shadow;
-	u32 gpu_idle_hysteresis_us;
+	u32 gpu_idle_hysteresis_ns;
 	u32 gpu_idle_dur_count;
+	u32 gpu_idle_dur_count_modifier;
 	unsigned int fw_timeout_ms;
 	struct kbase_csf_hwcnt hwcnt;
 	struct kbase_csf_mcu_fw fw;
@@ -1653,6 +1680,7 @@ struct kbase_csf_device {
 	struct kbase_csf_user_reg user_reg;
 	struct list_head pending_gpuq_kicks[KBASE_QUEUE_GROUP_PRIORITY_COUNT];
 	spinlock_t pending_gpuq_kicks_lock;
+	u32 *quirks_ext;
 };
 
 /**
@@ -1669,10 +1697,6 @@ struct kbase_csf_device {
  * @bf_data:           Data relating to Bus fault.
  * @gf_data:           Data relating to GPU fault.
  * @current_setup:     Stores the MMU configuration for this address space.
- * @is_unresponsive:   Flag to indicate MMU is not responding.
- *                     Set if a MMU command isn't completed within
- *                     &kbase_device:mmu_or_gpu_cache_op_wait_time_ms.
- *                     Clear by kbase_ctx_sched_restore_all_as() after GPU reset completes.
  */
 struct kbase_as {
 	int number;
@@ -1684,7 +1708,6 @@ struct kbase_as {
 	struct kbase_fault bf_data;
 	struct kbase_fault gf_data;
 	struct kbase_mmu_setup current_setup;
-	bool is_unresponsive;
 };
 
 #endif /* _KBASE_CSF_DEFS_H_ */
